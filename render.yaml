@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: poker-night-server
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --include=dev && npm run build -w @pk/server
+    startCommand: npm run start -w @pk/server
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false

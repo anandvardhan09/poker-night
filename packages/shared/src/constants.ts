@@ -1,0 +1,11 @@
+export const STARTING_CHIPS = 10_000;
+export const ACTION_TIMEOUT_MS = 30_000;
+export const NEXT_HAND_DELAY_MS = 5_000;
+export const MAX_MISSED_HANDS = 2;
+export const MIN_SEATS = 2;
+export const MAX_SEATS = 9;
+export const MIN_BUY_IN_BB = 20;
+export const MAX_BUY_IN_BB = 200;
+export const DEFAULT_BUY_IN_BB = 100;
+export const CHAT_HISTORY_LIMIT = 50;
+export const LOG_LIMIT = 60;
