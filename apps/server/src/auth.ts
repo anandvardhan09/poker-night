@@ -20,9 +20,11 @@ function fromMetadata(id: string, email: string | undefined, meta: Metadata | un
 }
 
 const jwtKey = config.supabase?.jwtSecret ? new TextEncoder().encode(config.supabase.jwtSecret) : null;
-const jwks = config.supabase?.url
-  ? createRemoteJWKSet(new URL(`${config.supabase.url}/auth/v1/.well-known/jwks.json`))
+const jwksUrl = config.supabase?.url
+  ? `${config.supabase.url.replace(/\/+$/, '')}/auth/v1/.well-known/jwks.json`
   : null;
+const jwks = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : null;
+if (jwksUrl) console.log('[auth] JWKS URL:', jwksUrl);
 
 /** Resolves the socket handshake payload to a user, or throws. */
 export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
@@ -40,8 +42,10 @@ export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
   if (jwks) {
     try {
       const { payload } = await jwtVerify(token, jwks, { audience: 'authenticated' });
+      console.log('[auth] JWKS verification succeeded for user:', payload.sub);
       return fromMetadata(payload.sub!, payload.email as string | undefined, payload.user_metadata as Metadata);
-    } catch {
+    } catch (e) {
+      console.error('[auth] JWKS verification failed:', e instanceof Error ? e.message : e);
       // Fall through to legacy secret or API
     }
   }
