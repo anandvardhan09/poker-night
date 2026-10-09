@@ -1,4 +1,4 @@
-import { createLocalJWKSet, createRemoteJWKSet, decodeJwt, jwtVerify, type JWTVerifyGetKey } from 'jose';
+import { createLocalJWKSet, createRemoteJWKSet, decodeJwt, jwtVerify, type JWTVerifyGetKey, type JSONWebKeySet } from 'jose';
 import { config } from './config';
 import { supabaseAdmin, type AuthUser } from './store';
 
@@ -35,7 +35,7 @@ const jwksReady: Promise<JWTVerifyGetKey | null> = (async () => {
       // Fall back to lazy remote JWKS (will retry on each auth attempt)
       return createRemoteJWKSet(new URL(url));
     }
-    const data = await res.json();
+    const data = (await res.json()) as JSONWebKeySet;
     console.log('[auth] JWKS loaded successfully, keys:', data.keys?.length ?? 0);
     return createLocalJWKSet(data);
   } catch (e) {

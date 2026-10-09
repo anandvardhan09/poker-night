@@ -6,11 +6,15 @@ export function SidePanel({
   log,
   onSend,
   myUserId,
+  isHost,
+  onKick,
 }: {
   chat: ChatMessage[];
   log: LogEntry[];
   onSend: (text: string) => void;
   myUserId: string | null;
+  isHost?: boolean;
+  onKick?: (userId: string, name: string) => void;
 }) {
   const [tab, setTab] = useState<'chat' | 'log'>('chat');
   const [text, setText] = useState('');
@@ -54,11 +58,23 @@ export function SidePanel({
       <div className="flex-1 space-y-1 overflow-y-auto p-3 text-sm">
         {tab === 'chat'
           ? chat.map((m) => (
-              <div key={m.id}>
-                <span className={`font-semibold ${m.userId === myUserId ? 'text-indigo-300' : 'text-amber-300'}`}>
-                  {m.name}:
-                </span>{' '}
-                <span className="break-words text-zinc-200">{m.text}</span>
+              <div key={m.id} className="group flex items-baseline justify-between gap-1">
+                <div>
+                  <span className={`font-semibold ${m.userId === myUserId ? 'text-indigo-300' : 'text-amber-300'}`}>
+                    {m.name}:
+                  </span>{' '}
+                  <span className="break-words text-zinc-200">{m.text}</span>
+                </div>
+                {isHost && m.userId !== myUserId && onKick && (
+                  <button
+                    type="button"
+                    onClick={() => onKick(m.userId, m.name)}
+                    className="shrink-0 text-[10px] text-red-400/70 hover:text-red-300 hover:underline"
+                    title={`Kick ${m.name}`}
+                  >
+                    Kick
+                  </button>
+                )}
               </div>
             ))
           : log.map((l, i) => (

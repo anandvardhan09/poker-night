@@ -12,6 +12,7 @@ interface Props {
   now: number;
   canSit: boolean;
   onSit: (seatNo: number) => void;
+  onKick?: (userId: string, name: string) => void;
 }
 
 /** Position on an ellipse, in percent of the container. Visual index 0 is bottom-center. */
@@ -20,7 +21,7 @@ function position(visualIndex: number, count: number, rx: number, ry: number) {
   return { left: `${50 + rx * Math.cos(angle)}%`, top: `${50 + ry * Math.sin(angle)}%` };
 }
 
-export function PokerTable({ state, myUserId, streams, local, now, canSit, onSit }: Props) {
+export function PokerTable({ state, myUserId, streams, local, now, canSit, onSit, onKick }: Props) {
   const n = state.maxSeats;
   const rotate = state.mySeat ?? 0;
   const visual = (seatNo: number) => (seatNo - rotate + n) % n;
@@ -118,6 +119,9 @@ export function PokerTable({ state, myUserId, streams, local, now, canSit, onSit
                 micOn={seat.userId === myUserId ? local.micOn : seat.micOn}
                 winner={winners.has(seatNo)}
                 handName={state.result?.showdown ? revealedNames.get(seatNo) ?? null : null}
+                isHost={seat.userId === state.hostId}
+                canKick={state.hostId === myUserId && seat.userId !== myUserId}
+                onKick={() => onKick?.(seat.userId, seat.name)}
               />
             ) : (
               <button

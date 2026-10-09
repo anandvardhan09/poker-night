@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { ChatMessage, JoinTableData, PlayerAction, TableState } from '@pk/shared';
 import { ActionBar } from '../components/ActionBar';
 import { BuyInDialog } from '../components/BuyInDialog';
@@ -16,6 +16,7 @@ type Dialog = { kind: 'sit'; seatNo: number } | { kind: 'rebuy' } | null;
 
 export function TablePage() {
   const { id: tableId = '' } = useParams();
+  const navigate = useNavigate();
   const { socket, connected, profile } = useSocket();
   const [state, setState] = useState<TableState | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
@@ -23,6 +24,8 @@ export function TablePage() {
   const [notFound, setNotFound] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  const [kickTarget, setKickTarget] = useState<{ userId: string; name: string } | null>(null);
+  const [kickError, setKickError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const clockOffset = useRef(0);
@@ -42,8 +45,15 @@ export function TablePage() {
     const onChat = (m: ChatMessage & { tableId: string }) => {
       if (m.tableId === tableId) setChat((c) => [...c.slice(-99), m]);
     };
+    const onKicked = (payload: { tableId: string; reason?: string }) => {
+      if (payload.tableId === tableId) {
+        alert(payload.reason || 'You were kicked from this table by the host');
+        navigate('/');
+      }
+    };
     socket.on('table:state', onState);
     socket.on('chat:message', onChat);
+    socket.on('table:kicked', onKicked);
     rpc<JoinTableData>(socket, 'table:join', { tableId })
       .then((d) => {
         onState(d.state);
@@ -54,9 +64,10 @@ export function TablePage() {
     return () => {
       socket.off('table:state', onState);
       socket.off('chat:message', onChat);
+      socket.off('table:kicked', onKicked);
       if (socket.connected) socket.emit('table:leave', { tableId });
     };
-  }, [socket, connected, tableId]);
+  }, [socket, connected, tableId, navigate]);
 
   const media = useLocalMedia(mySeat !== null);
   const streams = useMesh(socket, tableId, myUserId, state, media.stream);
@@ -123,6 +134,7 @@ export function TablePage() {
   }
 
   const inHand = !!me?.inHand && state?.street !== 'waiting' && state?.street !== 'showdown';
+  const isHost = myUserId !== null && state?.hostId === myUserId;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -130,6 +142,11 @@ export function TablePage() {
         {state && (
           <>
             <span className="font-semibold">{state.name}</span>
+            {isHost && (
+              <span className="rounded bg-amber-400/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                👑 Host
+              </span>
+            )}
             <span className="text-sm text-zinc-400">
               Blinds {chips(state.smallBlind)}/{chips(state.bigBlind)} · Hand #{state.handNo}
             </span>
@@ -159,6 +176,10 @@ export function TablePage() {
               onSit={(seatNo) => {
                 setDialogError(null);
                 setDialog({ kind: 'sit', seatNo });
+              }}
+              onKick={(userId, name) => {
+                setKickError(null);
+                setKickTarget({ userId, name });
               }}
             />
           ) : (
@@ -220,7 +241,12 @@ export function TablePage() {
             chat={chat}
             log={state?.log ?? []}
             myUserId={myUserId}
+            isHost={isHost}
             onSend={(text) => socket?.emit('chat:send', { tableId, text })}
+            onKick={(userId, name) => {
+              setKickError(null);
+              setKickTarget({ userId, name });
+            }}
           />
         </div>
       </main>
@@ -235,6 +261,49 @@ export function TablePage() {
           onCancel={() => setDialog(null)}
           onConfirm={confirmDialog}
         />
+      )}
+
+      {kickTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setKickTarget(null)}
+        >
+          <div
+            className="w-full max-w-sm space-y-4 rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-white">Kick Player</h2>
+            <p className="text-sm text-zinc-300">
+              Are you sure you want to kick <span className="font-bold text-amber-300">{kickTarget.name}</span> from this table?
+            </p>
+            {kickError && <p className="text-sm text-red-400">{kickError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setKickTarget(null)}
+                className="rounded-lg px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setKickError(null);
+                  try {
+                    await command('table:kick', { targetUserId: kickTarget.userId });
+                    setKickTarget(null);
+                  } catch (e) {
+                    setKickError((e as Error).message);
+                  }
+                }}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-40 transition"
+              >
+                Kick
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

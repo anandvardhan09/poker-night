@@ -141,6 +141,13 @@ io.on('connection', (socket) => {
     }),
   );
 
+  socket.on('table:kick', ({ tableId, targetUserId }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).kick(user, String(targetUserId));
+      return null;
+    }),
+  );
+
   socket.on('chat:send', async ({ tableId, text }) => {
     const rt = await tables.get(String(tableId));
     if (rt?.hasMember(socket.id)) rt.sendChat(user, String(text ?? ''));

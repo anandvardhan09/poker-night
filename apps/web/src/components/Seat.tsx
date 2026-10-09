@@ -16,9 +16,25 @@ export interface SeatProps {
   micOn: boolean;
   winner: boolean;
   handName: string | null;
+  isHost?: boolean;
+  canKick?: boolean;
+  onKick?: () => void;
 }
 
-export function Seat({ seat, isMe, toAct, timeLeft, stream, camOn, micOn, winner, handName }: SeatProps) {
+export function Seat({
+  seat,
+  isMe,
+  toAct,
+  timeLeft,
+  stream,
+  camOn,
+  micOn,
+  winner,
+  handName,
+  isHost,
+  canKick,
+  onKick,
+}: SeatProps) {
   const speaking = useSpeaking(stream, micOn);
   const showVideo = !!stream && camOn && stream.getVideoTracks().length > 0;
   const offline = !seat.connected;
@@ -73,8 +89,23 @@ export function Seat({ seat, isMe, toAct, timeLeft, stream, camOn, micOn, winner
           isMe ? 'bg-indigo-950/95 ring-indigo-400/40' : 'bg-zinc-900/95 ring-white/10'
         }`}
       >
-        <div className="truncate text-xs font-semibold">{seat.name}</div>
+        <div className="flex items-center justify-center gap-1">
+          {isHost && <span title="Room Leader" className="text-xs">👑</span>}
+          <div className="truncate text-xs font-semibold">{seat.name}</div>
+        </div>
         <div className="text-sm font-bold text-amber-300">{seat.allIn ? 'ALL IN' : chips(seat.stack)}</div>
+        {canKick && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onKick?.();
+            }}
+            className="mt-1 w-full rounded bg-red-600/80 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow hover:bg-red-500 transition"
+          >
+            Kick
+          </button>
+        )}
       </div>
 
       {(handName || seat.lastAction) && (

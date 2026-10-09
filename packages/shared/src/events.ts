@@ -68,6 +68,7 @@ export interface ClientToServerEvents {
   'rtc:config': (ack: Ack<{ iceServers: IceServerConfig[] }>) => void;
   'rtc:signal': (p: RtcSignalOut) => void;
   'rtc:media': (p: { tableId: string; camOn: boolean; micOn: boolean }) => void;
+  'table:kick': (p: { tableId: string; targetUserId: string }, ack: Ack<null>) => void;
 }
 
 export interface ServerToClientEvents {
@@ -75,5 +76,6 @@ export interface ServerToClientEvents {
   'chat:message': (msg: ChatMessage & { tableId: string }) => void;
   'me:profile': (profile: Profile) => void;
   'rtc:signal': (p: RtcSignalIn) => void;
+  'table:kicked': (p: { tableId: string; reason?: string }) => void;
   'error:message': (msg: string) => void;
 }

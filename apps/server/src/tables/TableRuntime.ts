@@ -49,6 +49,7 @@ export class TableRuntime {
   private nextHandTimer: NodeJS.Timeout | null = null;
   private nextHandAt: number | null = null;
   private pendingCredits: { userId: string; amount: number }[] = [];
+  private kickedUsers = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -93,6 +94,9 @@ export class TableRuntime {
 
   join(socketId: string, user: AuthUser) {
     return this.run(async () => {
+      if (this.kickedUsers.has(user.id)) {
+        throw new GameError('You were kicked from this table');
+      }
       this.members.set(socketId, user.id);
       this.io.in(socketId).socketsJoin(this.room);
       const seat = findSeat(this.state, user.id);
@@ -128,6 +132,56 @@ export class TableRuntime {
         p.connected = false;
         addLog(this.state, `${p.name} disconnected`);
       }
+      await this.afterChange(seat !== null);
+    });
+  }
+
+  kick(user: AuthUser, targetUserId: string) {
+    return this.run(async () => {
+      if (user.id !== this.meta.hostId) throw new GameError('Only the room leader can kick players');
+      if (targetUserId === user.id) throw new GameError('Cannot kick yourself');
+
+      const s = this.state;
+      const seat = findSeat(s, targetUserId);
+      const isMember = this.isMemberUser(targetUserId);
+
+      if (seat === null && !isMember) {
+        throw new GameError('Player not found at this table');
+      }
+
+      this.kickedUsers.add(targetUserId);
+
+      let playerName = 'Player';
+      if (seat !== null) {
+        const p = s.seats[seat]!;
+        playerName = p.name;
+        if (isBetting(s) && p.inHand) {
+          p.leaveAfterHand = true;
+          if (!p.folded && !p.allIn) forceFold(s, seat);
+          addLog(s, `${playerName} was kicked by host`);
+        } else {
+          this.removeSeat(seat);
+          addLog(s, `${playerName} was kicked by host`);
+        }
+      } else {
+        addLog(s, `A player was kicked by host`);
+      }
+
+      this.io.to(`user:${targetUserId}`).emit('table:kicked', {
+        tableId: this.meta.id,
+        reason: 'You were kicked from this table by the host',
+      });
+
+      for (const [socketId, userId] of this.members) {
+        if (userId === targetUserId) {
+          this.members.delete(socketId);
+          this.io.in(socketId).socketsLeave(this.room);
+        }
+      }
+
+      this.media.delete(targetUserId);
+      this.epochs.delete(targetUserId);
+
       await this.afterChange(seat !== null);
     });
   }
