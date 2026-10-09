@@ -1,4 +1,4 @@
-import { jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { config } from './config';
 import { supabaseAdmin, type AuthUser } from './store';
 
@@ -20,6 +20,9 @@ function fromMetadata(id: string, email: string | undefined, meta: Metadata | un
 }
 
 const jwtKey = config.supabase?.jwtSecret ? new TextEncoder().encode(config.supabase.jwtSecret) : null;
+const jwks = config.supabase?.url
+  ? createRemoteJWKSet(new URL(`${config.supabase.url}/auth/v1/.well-known/jwks.json`))
+  : null;
 
 /** Resolves the socket handshake payload to a user, or throws. */
 export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
@@ -33,16 +36,34 @@ export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
   const token = auth.token;
   if (!token) throw new Error('Not signed in');
 
+  // 1. Try modern JWKS verification (ES256/RS256 used by modern Supabase projects)
+  if (jwks) {
+    try {
+      const { payload } = await jwtVerify(token, jwks, { audience: 'authenticated' });
+      return fromMetadata(payload.sub!, payload.email as string | undefined, payload.user_metadata as Metadata);
+    } catch {
+      // Fall through to legacy secret or API
+    }
+  }
+
+  // 2. Try legacy HS256 secret verification
   if (jwtKey) {
     try {
       const { payload } = await jwtVerify(token, jwtKey, { audience: 'authenticated' });
       return fromMetadata(payload.sub!, payload.email as string | undefined, payload.user_metadata as Metadata);
     } catch {
-      // Fall through to Supabase verification (e.g. project uses asymmetric signing keys).
+      // Fall through to Supabase API verification
     }
   }
 
-  const { data, error } = await supabaseAdmin!.auth.getUser(token);
-  if (error || !data.user) throw new Error('Invalid session');
-  return fromMetadata(data.user.id, data.user.email, data.user.user_metadata as Metadata);
+  // 3. Fall through to Supabase API verification
+  if (supabaseAdmin) {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (!error && data?.user) {
+      return fromMetadata(data.user.id, data.user.email, data.user.user_metadata as Metadata);
+    }
+    console.error('Supabase auth.getUser failed:', error?.message || error);
+  }
+
+  throw new Error('Invalid session');
 }
