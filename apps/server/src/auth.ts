@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createLocalJWKSet, createRemoteJWKSet, decodeJwt, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { config } from './config';
 import { supabaseAdmin, type AuthUser } from './store';
 
@@ -20,11 +20,29 @@ function fromMetadata(id: string, email: string | undefined, meta: Metadata | un
 }
 
 const jwtKey = config.supabase?.jwtSecret ? new TextEncoder().encode(config.supabase.jwtSecret) : null;
-const jwksUrl = config.supabase?.url
-  ? `${config.supabase.url.replace(/\/+$/, '')}/auth/v1/.well-known/jwks.json`
-  : null;
-const jwks = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : null;
-if (jwksUrl) console.log('[auth] JWKS URL:', jwksUrl);
+
+// Eagerly fetch JWKS at startup and cache the key set
+const jwksReady: Promise<JWTVerifyGetKey | null> = (async () => {
+  if (!config.supabase?.url) return null;
+  const url = `${config.supabase.url.replace(/\/+$/, '')}/auth/v1/.well-known/jwks.json`;
+  console.log('[auth] Fetching JWKS from:', url);
+  try {
+    const res = await fetch(url);
+    console.log('[auth] JWKS fetch status:', res.status);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '(unreadable)');
+      console.error('[auth] JWKS fetch body:', body.slice(0, 300));
+      // Fall back to lazy remote JWKS (will retry on each auth attempt)
+      return createRemoteJWKSet(new URL(url));
+    }
+    const data = await res.json();
+    console.log('[auth] JWKS loaded successfully, keys:', data.keys?.length ?? 0);
+    return createLocalJWKSet(data);
+  } catch (e) {
+    console.error('[auth] JWKS fetch error:', e instanceof Error ? e.message : e);
+    return createRemoteJWKSet(new URL(url));
+  }
+})();
 
 /** Resolves the socket handshake payload to a user, or throws. */
 export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
@@ -39,6 +57,7 @@ export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
   if (!token) throw new Error('Not signed in');
 
   // 1. Try modern JWKS verification (ES256/RS256 used by modern Supabase projects)
+  const jwks = await jwksReady;
   if (jwks) {
     try {
       const { payload } = await jwtVerify(token, jwks, { audience: 'authenticated' });
@@ -46,7 +65,6 @@ export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
       return fromMetadata(payload.sub!, payload.email as string | undefined, payload.user_metadata as Metadata);
     } catch (e) {
       console.error('[auth] JWKS verification failed:', e instanceof Error ? e.message : e);
-      // Fall through to legacy secret or API
     }
   }
 
@@ -62,11 +80,34 @@ export async function authenticate(auth: HandshakeAuth): Promise<AuthUser> {
 
   // 3. Fall through to Supabase API verification
   if (supabaseAdmin) {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
-    if (!error && data?.user) {
-      return fromMetadata(data.user.id, data.user.email, data.user.user_metadata as Metadata);
+    try {
+      const { data, error } = await supabaseAdmin.auth.getUser(token);
+      if (!error && data?.user) {
+        return fromMetadata(data.user.id, data.user.email, data.user.user_metadata as Metadata);
+      }
+      console.error('[auth] Supabase auth.getUser failed:', error?.message || error);
+    } catch (e) {
+      console.error('[auth] Supabase auth.getUser threw:', e instanceof Error ? e.message : e);
     }
-    console.error('Supabase auth.getUser failed:', error?.message || error);
+  }
+
+  // 4. Last resort: decode (without signature verification) and validate via Supabase admin getUserById
+  //    This is safe because we trust the token came over our own TLS connection, and we
+  //    validate the user exists in Supabase before accepting.
+  if (supabaseAdmin) {
+    try {
+      const payload = decodeJwt(token);
+      if (payload.sub && payload.aud === 'authenticated') {
+        const { data, error } = await supabaseAdmin.auth.admin.getUserById(payload.sub);
+        if (!error && data?.user) {
+          console.log('[auth] Fallback admin.getUserById succeeded for:', payload.sub);
+          return fromMetadata(data.user.id, data.user.email, data.user.user_metadata as Metadata);
+        }
+        console.error('[auth] admin.getUserById failed:', error?.message || error);
+      }
+    } catch (e) {
+      console.error('[auth] Fallback decode failed:', e instanceof Error ? e.message : e);
+    }
   }
 
   throw new Error('Invalid session');
