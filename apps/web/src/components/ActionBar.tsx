@@ -5,10 +5,12 @@ import { chips } from '../lib/format';
 export function ActionBar({
   state,
   onAct,
+  onTimeBank,
   busy,
 }: {
   state: TableState;
   onAct: (a: PlayerAction) => void;
+  onTimeBank: () => void;
   busy: boolean;
 }) {
   const legal = state.legal!;
@@ -24,6 +26,7 @@ export function ActionBar({
   // Pot-sized raise: call, then raise by the size of the pot after calling.
   const potRaise = (fraction: number) => state.currentBet + (state.potTotal + toCall) * fraction;
   const isBet = state.currentBet === 0;
+  const potLimit = state.settings.variant === 'omaha';
   const canRaise = legal.minRaiseTo !== null;
 
   return (
@@ -31,6 +34,17 @@ export function ActionBar({
       <button disabled={busy} onClick={() => onAct({ type: 'fold' })} className="btn bg-zinc-700 hover:bg-zinc-600">
         Fold
       </button>
+      {me.timeBankMs > 0 && (
+        <button
+          disabled={busy}
+          onClick={onTimeBank}
+          title="Add up to 30 seconds from your time bank"
+          className="btn bg-zinc-800 px-3 text-sm hover:bg-zinc-700"
+        >
+          ⏱ +{Math.round(Math.min(30_000, me.timeBankMs) / 1000)}s
+          <span className="ml-1 text-xs font-normal text-zinc-400">({Math.round(me.timeBankMs / 1000)}s left)</span>
+        </button>
+      )}
       {legal.check ? (
         <button disabled={busy} onClick={() => onAct({ type: 'check' })} className="btn bg-sky-600 hover:bg-sky-500">
           Check
@@ -47,7 +61,7 @@ export function ActionBar({
               ['Min', min],
               ['½ Pot', potRaise(0.5)],
               ['Pot', potRaise(1)],
-              ['All-in', max],
+              [potLimit ? 'Max' : 'All-in', max],
             ].map(([label, v]) => (
               <button
                 key={label as string}
@@ -81,7 +95,7 @@ export function ActionBar({
             onClick={() => onAct({ type: 'raise', amount: clamp(raiseTo) })}
             className="btn bg-amber-500 text-zinc-950 hover:bg-amber-400"
           >
-            {clamp(raiseTo) === max ? 'All-in' : isBet ? 'Bet' : 'Raise to'} {chips(clamp(raiseTo))}
+            {clamp(raiseTo) === me.bet + me.stack ? 'All-in' : isBet ? 'Bet' : 'Raise to'} {chips(clamp(raiseTo))}
           </button>
         </div>
       )}

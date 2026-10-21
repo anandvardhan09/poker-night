@@ -8,6 +8,14 @@ Texas Hold'em with friends, with live video and audio for each player at their s
 - **Database and auth**: Supabase (Google sign-in, plus Postgres for profiles, chip balances, seats, table snapshots and hand history).
 - **Video**: peer-to-peer WebRTC between seated players. The game server relays the connection-setup messages. Works well up to about 6 players.
 
+## Features
+
+- **Game types**: No-limit Texas Hold'em and Pot-limit Omaha (PLO). Cash games or **Sit & Go** tournaments (fixed buy-in, rising blinds, prizes for 1st-3rd).
+- **At the table**: act-in-advance buttons (Check/Fold, Check, Call any), a 60-second time bank, show cards after an uncontested win, run it twice, straddle, bomb pots, emoji reactions, sounds and a "Your turn" tab alert.
+- **Hosts**: pause/resume, change blinds, rising blind levels, turn timer, straddle/run-it-twice switches, add or remove bots, private or password-protected tables, kick (kicks survive restarts), end the session and cash everyone out.
+- **History and stats**: replay any previous hand street by street; per-player hands, VPIP, PFR, win rate, net and biggest pot; session results you can copy or download as an image.
+- **Social**: friends with online status and "join their table", table invites, leaderboard (everyone or friends), a daily top-up back to 10,000 chips, spectators (the first 4 also get video) and a waitlist that seats people automatically.
+
 ## Run locally
 
 ```bash
@@ -18,7 +26,7 @@ npm test             # engine tests (blinds, side pots, split pots, chip conserv
 
 Without Supabase settings, the app runs in **dev mode**: you log in with just a name, and data is saved to `apps/server/.data/dev-db.json`. Open several browser profiles or windows to play against yourself. Camera access only works on `localhost` or over HTTPS.
 
-`npm run smoke -w @pk/server` runs an end-to-end bot game against a running dev server. It checks seat retention on disconnect, reconnection, and recovery after a restart.
+`npm run smoke -w @pk/server` runs an end-to-end bot game against a running dev server. It checks seat retention on disconnect, reconnection, and recovery after a restart. `npx tsx apps/server/scripts/features-smoke.ts` checks the newer features (passwords, waitlist, bots, pre-actions, time bank, history, stats, host controls, friends, closing a table and a full Sit & Go).
 
 ## How saved state works
 
@@ -38,7 +46,7 @@ gh repo create poker-night --private --source . --push
 ### 2. Supabase (database + Google login)
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. In **SQL Editor**, run [`supabase/migrations/001_init.sql`](supabase/migrations/001_init.sql).
+2. In **SQL Editor**, run [`supabase/migrations/001_init.sql`](supabase/migrations/001_init.sql), then [`supabase/migrations/002_features.sql`](supabase/migrations/002_features.sql). Existing projects only need `002_features.sql`.
 3. Create a Google OAuth client in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
    - Configure the OAuth consent screen (External). Either add your friends as test users or publish the app.
    - Create credentials: **OAuth client ID**, type **Web application**.
@@ -84,4 +92,4 @@ TURN_CREDENTIAL=<from dashboard>
 
 - **Render** sleeps after 15 idle minutes, and the first visit then takes about 50 seconds while the app shows "Server is waking up…". While anyone has the app open, it pings `/health` every 4 minutes to keep the server awake. Saved snapshots mean a sleep never loses a game.
 - **Supabase** pauses projects after 7 days without activity. Resume it from the dashboard.
-- **Video** is a full mesh, so each player uploads one stream per other player. Video is capped at 320x240 and 15 fps so 6 players stay smooth on home internet.
+- **Video** is a full mesh, so each player uploads one stream per other player (and per video spectator, at most 4). Video is capped at 320x240 and 15 fps so 6 players stay smooth on home internet.

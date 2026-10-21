@@ -5,7 +5,10 @@ import { PeerMesh, type PeerTarget } from './PeerMesh';
 
 const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 
-/** Maintains WebRTC connections to every other connected, seated player. Returns their streams by user id. */
+/**
+ * Maintains WebRTC connections to every other connected, seated player (and, for seated players, to
+ * spectators who receive video). Returns their streams by user id.
+ */
 export function useMesh(
   socket: AppSocket | null,
   tableId: string,
@@ -18,8 +21,10 @@ export function useMesh(
   const [streams, setStreams] = useState<Map<string, MediaStream>>(new Map());
 
   const mySeat = state?.mySeat ?? null;
-  const selfEpoch = mySeat !== null ? state?.seats[mySeat]?.rtcEpoch ?? 0 : 0;
   const seated = mySeat !== null;
+  const spectatorEpoch = state?.spectators.find((x) => x.userId === selfId)?.rtcEpoch ?? 0;
+  const selfEpoch = seated ? state?.seats[mySeat]?.rtcEpoch ?? 0 : spectatorEpoch;
+  const inMesh = seated || spectatorEpoch > 0;
 
   useEffect(() => {
     if (!socket) return;
@@ -29,7 +34,7 @@ export function useMesh(
   }, [socket]);
 
   useEffect(() => {
-    if (!socket || !selfId || !iceServers || !seated) return;
+    if (!socket || !selfId || !iceServers || !inMesh) return;
     const m = new PeerMesh(
       selfId,
       iceServers,
@@ -47,7 +52,7 @@ export function useMesh(
       setMesh(null);
       setStreams(new Map());
     };
-  }, [socket, selfId, iceServers, seated, tableId]);
+  }, [socket, selfId, iceServers, inMesh, tableId]);
 
   useEffect(() => {
     mesh?.setLocalStream(localStream);
@@ -55,12 +60,15 @@ export function useMesh(
 
   const targetsKey = useMemo(() => {
     if (!state) return '';
-    return state.seats
-      .filter((p) => p && p.userId !== selfId && p.connected && p.rtcEpoch)
-      .map((p) => `${p!.userId}:${p!.rtcEpoch}`)
-      .sort()
-      .join(',');
-  }, [state, selfId]);
+    const players = state.seats
+      .filter((p) => p && p.userId !== selfId && p.connected && p.rtcEpoch && !p.isBot)
+      .map((p) => `${p!.userId}:${p!.rtcEpoch}`);
+    // Seated players also send their video to spectators; spectators only connect to players.
+    const watchers = seated
+      ? state.spectators.filter((x) => x.rtcEpoch && x.userId !== selfId).map((x) => `${x.userId}:${x.rtcEpoch}`)
+      : [];
+    return [...players, ...watchers].sort().join(',');
+  }, [state, selfId, seated]);
 
   useEffect(() => {
     if (!mesh) return;

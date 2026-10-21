@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { ChatMessage, LogEntry } from '@pk/shared';
+import type { ChatMessage, HandHistoryEntry, LogEntry } from '@pk/shared';
+import { HandHistory } from './HandHistory';
 
 export function SidePanel({
   chat,
@@ -8,6 +9,8 @@ export function SidePanel({
   myUserId,
   isHost,
   onKick,
+  loadHistory,
+  handNo,
 }: {
   chat: ChatMessage[];
   log: LogEntry[];
@@ -15,8 +18,10 @@ export function SidePanel({
   myUserId: string | null;
   isHost?: boolean;
   onKick?: (userId: string, name: string) => void;
+  loadHistory: () => Promise<HandHistoryEntry[]>;
+  handNo: number;
 }) {
-  const [tab, setTab] = useState<'chat' | 'log'>('chat');
+  const [tab, setTab] = useState<'chat' | 'log' | 'history'>('chat');
   const [text, setText] = useState('');
   const [unread, setUnread] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
@@ -39,7 +44,7 @@ export function SidePanel({
   return (
     <aside className="flex h-full min-h-64 flex-col rounded-2xl border border-white/10 bg-zinc-900/80">
       <div className="flex border-b border-white/10 text-sm">
-        {(['chat', 'log'] as const).map((t) => (
+        {(['chat', 'log', 'history'] as const).map((t) => (
           <button
             key={t}
             onClick={() => {
@@ -48,7 +53,7 @@ export function SidePanel({
             }}
             className={`flex-1 py-2 capitalize ${tab === t ? 'border-b-2 border-amber-400 text-white' : 'text-zinc-400'}`}
           >
-            {t === 'log' ? 'Hand log' : 'Chat'}
+            {t === 'log' ? 'Log' : t === 'history' ? 'Past hands' : 'Chat'}
             {t === 'chat' && unread > 0 && (
               <span className="ml-1 rounded-full bg-amber-500 px-1.5 text-[10px] text-zinc-950">{unread}</span>
             )}
@@ -56,7 +61,9 @@ export function SidePanel({
         ))}
       </div>
       <div className="flex-1 space-y-1 overflow-y-auto p-3 text-sm">
-        {tab === 'chat'
+        {tab === 'history' ? (
+          <HandHistory load={loadHistory} myUserId={myUserId} refreshKey={handNo} />
+        ) : tab === 'chat'
           ? chat.map((m) => (
               <div key={m.id} className="group flex items-baseline justify-between gap-1">
                 <div>
@@ -82,7 +89,7 @@ export function SidePanel({
                 {l.text}
               </div>
             ))}
-        <div ref={endRef} />
+        {tab !== 'history' && <div ref={endRef} />}
       </div>
       {tab === 'chat' && (
         <form onSubmit={submit} className="flex gap-2 border-t border-white/10 p-2">
