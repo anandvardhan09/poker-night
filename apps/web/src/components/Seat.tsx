@@ -17,8 +17,10 @@ export interface SeatProps {
   winner: boolean;
   handName: string | null;
   isHost?: boolean;
-  canKick?: boolean;
-  onKick?: () => void;
+  /** Emoji reaction currently floating over this seat. */
+  reaction?: string | null;
+  onOpen?: () => void;
+  cardsPerPlayer?: number;
 }
 
 export function Seat({
@@ -32,13 +34,15 @@ export function Seat({
   winner,
   handName,
   isHost,
-  canKick,
-  onKick,
+  reaction,
+  onOpen,
+  cardsPerPlayer = 2,
 }: SeatProps) {
   const speaking = useSpeaking(stream, micOn);
   const showVideo = !!stream && camOn && stream.getVideoTracks().length > 0;
   const offline = !seat.connected;
   const out = seat.folded || seat.status === 'sitting_out' || offline;
+  const cardCount = cardsPerPlayer;
 
   return (
     <div className="relative flex w-36 flex-col items-center">
@@ -50,10 +54,10 @@ export function Seat({
         {stream && <VideoTile stream={stream} muted={isMe} mirrored={isMe} hidden={!showVideo} />}
         {!showVideo && (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-zinc-700 to-zinc-900">
-            <Avatar name={seat.name} url={seat.avatarUrl} size={52} />
+            {seat.isBot ? <span className="text-4xl">🤖</span> : <Avatar name={seat.name} url={seat.avatarUrl} size={52} />}
           </div>
         )}
-        {seat.connected && !micOn && (
+        {seat.connected && !micOn && !seat.isBot && (
           <span className="absolute right-1 top-1 z-10 rounded bg-black/60 px-1 text-[10px]" title="Muted">
             🔇
           </span>
@@ -73,40 +77,36 @@ export function Seat({
         )}
       </div>
 
-      <div className="z-10 -mt-5 flex h-11 gap-0.5">
+      <div className="z-10 -mt-5 flex h-11 items-end gap-0.5">
         {seat.cards
-          ? seat.cards.map((c) => <PlayingCard key={c} card={c} size="sm" dim={seat.folded} />)
-          : seat.hasCards && (
-              <>
-                <PlayingCard size="sm" />
-                <PlayingCard size="sm" />
-              </>
-            )}
+          ? seat.cards.map((c) => (
+              <PlayingCard key={c} card={c} size={seat.cards!.length > 2 ? 'xs' : 'sm'} dim={seat.folded} />
+            ))
+          : seat.hasCards &&
+            Array.from({ length: cardCount }, (_, i) => <PlayingCard key={i} size={cardCount > 2 ? 'xs' : 'sm'} />)}
       </div>
 
-      <div
-        className={`z-10 -mt-1 min-w-32 max-w-36 rounded-lg px-3 py-1 text-center ring-1 ${
+      {reaction && (
+        <div key={reaction} className="reaction pointer-events-none absolute -top-6 z-30 text-4xl drop-shadow-lg">
+          {reaction.split(':')[0]}
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={onOpen}
+        title="Player info"
+        className={`z-10 -mt-1 min-w-32 max-w-36 rounded-lg px-3 py-1 text-center ring-1 transition hover:ring-amber-400/60 ${
           isMe ? 'bg-indigo-950/95 ring-indigo-400/40' : 'bg-zinc-900/95 ring-white/10'
         }`}
       >
         <div className="flex items-center justify-center gap-1">
-          {isHost && <span title="Room Leader" className="text-xs">👑</span>}
+          {isHost && <span title="Host" className="text-xs">👑</span>}
+          {seat.isBot && <span className="rounded bg-sky-500/30 px-1 text-[9px] font-bold text-sky-200">BOT</span>}
           <div className="truncate text-xs font-semibold">{seat.name}</div>
         </div>
         <div className="text-sm font-bold text-amber-300">{seat.allIn ? 'ALL IN' : chips(seat.stack)}</div>
-        {canKick && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onKick?.();
-            }}
-            className="mt-1 w-full rounded bg-red-600/80 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow hover:bg-red-500 transition"
-          >
-            Kick
-          </button>
-        )}
-      </div>
+      </button>
 
       {(handName || seat.lastAction) && (
         <div

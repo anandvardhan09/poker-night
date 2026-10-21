@@ -5,6 +5,7 @@ import { SupabaseStore } from './supabaseStore';
 import type { Store } from './types';
 
 export * from './types';
+export * from './defaults';
 
 export const supabaseAdmin: SupabaseClient | null = config.supabase
   ? createClient(config.supabase.url, config.supabase.serviceRoleKey, {

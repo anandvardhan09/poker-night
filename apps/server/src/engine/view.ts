@@ -1,5 +1,15 @@
-import type { PublicSeat, SeatStatus, TableState } from '@pk/shared';
-import { findSeat, isBetting, legalActions, type EnginePlayer, type GameState } from './game';
+import type {
+  BlindLevelInfo,
+  PublicSeat,
+  SeatStatus,
+  SessionEntry,
+  Spectator,
+  TableSettings,
+  TableState,
+  TournamentInfo,
+  WaitlistEntry,
+} from '@pk/shared';
+import { canShowCards, findSeat, isBetting, legalActions, type EnginePlayer, type GameState } from './game';
 import { computePots } from './pots';
 
 export interface TableMeta {
@@ -14,6 +24,18 @@ export interface SeatExtras {
   rtcEpoch: number;
 }
 
+/** Table-level information kept by the runtime rather than the engine. */
+export interface RuntimeView {
+  settings: TableSettings;
+  paused: boolean;
+  nextHandAt: number | null;
+  blinds: BlindLevelInfo;
+  tournament: TournamentInfo | null;
+  spectators: Spectator[];
+  waitlist: WaitlistEntry[];
+  session: SessionEntry[];
+}
+
 export function seatStatus(p: EnginePlayer): SeatStatus {
   if (p.sittingOut) return 'sitting_out';
   if (!p.connected) return 'disconnected';
@@ -25,7 +47,7 @@ export function toPublicState(
   meta: TableMeta,
   viewerId: string | null,
   extras: (userId: string) => SeatExtras,
-  nextHandAt: number | null,
+  rt: RuntimeView,
   now = Date.now(),
 ): TableState {
   const mySeat = viewerId ? findSeat(s, viewerId) : null;
@@ -54,6 +76,11 @@ export function toPublicState(
       camOn: x.camOn,
       micOn: x.micOn,
       rtcEpoch: x.rtcEpoch,
+      isBot: p.isBot,
+      timeBankMs: p.timeBankMs,
+      preAction: own ? p.preAction : null,
+      wantsStraddle: own ? p.wantsStraddle : false,
+      ritOptIn: own ? p.ritOptIn : false,
     };
   });
 
@@ -74,18 +101,29 @@ export function toPublicState(
     seats,
     street: s.street,
     board: s.board,
+    board2: s.board2,
     pots: s.street === 'showdown' ? [] : computePots(collected),
     potTotal: inHand.reduce((sum, p) => sum + p.committed, 0),
     currentBet: s.currentBet,
     dealerSeat: s.dealerSeat,
     toAct: s.toAct,
     actionDeadline: s.actionDeadline,
-    nextHandAt,
+    nextHandAt: rt.nextHandAt,
     handNo: s.handNo,
     result: s.result,
     log: s.log.slice(-30),
     mySeat,
     legal: mySeat !== null ? legalActions(s, mySeat) : null,
     serverTime: now,
+    settings: rt.settings,
+    paused: rt.paused,
+    actionTimeoutMs: s.actionTimeoutMs,
+    bombPotNext: s.bombPotNext,
+    blinds: rt.blinds,
+    tournament: rt.tournament,
+    spectators: rt.spectators,
+    waitlist: rt.waitlist,
+    session: rt.session,
+    canShowCards: mySeat !== null && canShowCards(s, mySeat),
   };
 }

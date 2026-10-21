@@ -6,6 +6,7 @@ const SUITS: Record<string, { symbol: string; red: boolean }> = {
 };
 
 const SIZES = {
+  xs: 'h-7 w-5 text-[10px]',
   sm: 'h-11 w-8 text-sm',
   md: 'h-16 w-11 text-lg',
   lg: 'h-20 w-14 text-2xl',

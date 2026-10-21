@@ -2,17 +2,22 @@ import {
   ACTION_TIMEOUT_MS,
   LOG_LIMIT,
   MAX_MISSED_HANDS,
+  TIME_BANK_CHUNK_MS,
+  TIME_BANK_MAX_MS,
+  TIME_BANK_PER_HAND_MS,
   type Card,
   type HandResult,
   type HandWinner,
   type LegalActions,
   type LogEntry,
   type PlayerAction,
+  type PreAction,
   type RevealedHand,
   type Street,
+  type Variant,
 } from '@pk/shared';
 import { newDeck, secureRng, shuffle, type Rng } from './deck';
-import { evaluateShowdown } from './evaluate';
+import { describeHand, evaluateShowdown } from './evaluate';
 import { computePots } from './pots';
 
 export interface EnginePlayer {
@@ -37,6 +42,13 @@ export interface EnginePlayer {
   autoSatOut: boolean;
   missedHands: number;
   leaveAfterHand: boolean;
+  isBot: boolean;
+  /** Stack at the start of the current hand (for stats and tournament placing). */
+  handStartStack: number;
+  timeBankMs: number;
+  preAction: PreAction | null;
+  wantsStraddle: boolean;
+  ritOptIn: boolean;
 }
 
 export interface HandActionRecord {
@@ -57,6 +69,8 @@ export interface GameState {
   street: Street;
   deck: Card[];
   board: Card[];
+  /** Second board when the hand is run twice. */
+  board2: Card[] | null;
   dealerSeat: number;
   toAct: number | null;
   currentBet: number;
@@ -70,6 +84,57 @@ export interface GameState {
   handSettled: boolean;
   log: LogEntry[];
   handActions: HandActionRecord[];
+  variant: Variant;
+  straddleAllowed: boolean;
+  ritAllowed: boolean;
+  bombPotNext: boolean;
+  /** Ante per player for a bomb pot, in big blinds. */
+  bombPotBB: number;
+  /** Blinds to apply when the next hand starts. */
+  pendingBlinds: { smallBlind: number; bigBlind: number } | null;
+  /** Table-level data owned by the server runtime, saved with the snapshot. */
+  extras: TableExtras;
+}
+
+export interface LedgerEntry {
+  name: string;
+  buyIn: number;
+  cashOut: number;
+}
+
+export interface TournamentState {
+  status: 'registering' | 'running' | 'finished';
+  entrants: { userId: string; name: string; isBot: boolean }[];
+  prizePool: number;
+  results: { userId: string; name: string; place: number; prize: number }[];
+}
+
+export interface TableExtras {
+  paused: boolean;
+  pausedAt: number | null;
+  kicked: string[];
+  waitlist: { userId: string; name: string }[];
+  ledger: Record<string, LedgerEntry>;
+  blindLevel: number;
+  levelStartedAt: number | null;
+  baseSmallBlind: number;
+  baseBigBlind: number;
+  tournament: TournamentState | null;
+}
+
+export function defaultExtras(smallBlind: number, bigBlind: number): TableExtras {
+  return {
+    paused: false,
+    pausedAt: null,
+    kicked: [],
+    waitlist: [],
+    ledger: {},
+    blindLevel: 0,
+    levelStartedAt: null,
+    baseSmallBlind: smallBlind,
+    baseBigBlind: bigBlind,
+    tournament: null,
+  };
 }
 
 export class GameError extends Error {}
@@ -80,6 +145,9 @@ export interface GameOptions {
   bigBlind: number;
   maxSeats: number;
   actionTimeoutMs?: number;
+  variant?: Variant;
+  straddle?: boolean;
+  runItTwice?: boolean;
 }
 
 export function createGame(o: GameOptions): GameState {
@@ -92,6 +160,7 @@ export function createGame(o: GameOptions): GameState {
     street: 'waiting',
     deck: [],
     board: [],
+    board2: null,
     dealerSeat: -1,
     toAct: null,
     currentBet: 0,
@@ -103,7 +172,36 @@ export function createGame(o: GameOptions): GameState {
     handSettled: true,
     log: [],
     handActions: [],
+    variant: o.variant ?? 'holdem',
+    straddleAllowed: !!o.straddle,
+    ritAllowed: !!o.runItTwice,
+    bombPotNext: false,
+    bombPotBB: 2,
+    pendingBlinds: null,
+    extras: defaultExtras(o.smallBlind, o.bigBlind),
   };
+}
+
+/** Fills fields added after a snapshot was saved, so old snapshots keep loading. */
+export function normalizeState(s: GameState): GameState {
+  s.board2 ??= null;
+  s.variant ??= 'holdem';
+  s.straddleAllowed ??= false;
+  s.ritAllowed ??= false;
+  s.bombPotNext ??= false;
+  s.bombPotBB ??= 2;
+  s.pendingBlinds ??= null;
+  s.extras = { ...defaultExtras(s.smallBlind, s.bigBlind), ...(s.extras ?? {}) };
+  for (const p of s.seats) {
+    if (!p) continue;
+    p.isBot ??= false;
+    p.handStartStack ??= p.stack + p.committed;
+    p.timeBankMs ??= TIME_BANK_MAX_MS;
+    p.preAction ??= null;
+    p.wantsStraddle ??= false;
+    p.ritOptIn ??= false;
+  }
+  return s;
 }
 
 // ---------- seating ----------
@@ -111,14 +209,16 @@ export function createGame(o: GameOptions): GameState {
 export function seatPlayer(
   s: GameState,
   seatNo: number,
-  info: { userId: string; name: string; avatarUrl: string | null },
+  info: { userId: string; name: string; avatarUrl: string | null; isBot?: boolean },
   stack: number,
 ): EnginePlayer {
   if (seatNo < 0 || seatNo >= s.maxSeats) throw new GameError('Invalid seat');
   if (s.seats[seatNo]) throw new GameError('Seat is taken');
   if (findSeat(s, info.userId) !== null) throw new GameError('Already seated at this table');
   const p: EnginePlayer = {
-    ...info,
+    userId: info.userId,
+    name: info.name,
+    avatarUrl: info.avatarUrl,
     seatNo,
     stack,
     bet: 0,
@@ -134,6 +234,12 @@ export function seatPlayer(
     autoSatOut: false,
     missedHands: 0,
     leaveAfterHand: false,
+    isBot: !!info.isBot,
+    handStartStack: stack,
+    timeBankMs: TIME_BANK_MAX_MS,
+    preAction: null,
+    wantsStraddle: false,
+    ritOptIn: !!info.isBot,
   };
   s.seats[seatNo] = p;
   addLog(s, `${p.name} sits down with ${stack}`);
@@ -178,14 +284,40 @@ function nextSeat(s: GameState, from: number, pred: (p: EnginePlayer | null) => 
   return null;
 }
 
-function players(s: GameState): EnginePlayer[] {
+export function players(s: GameState): EnginePlayer[] {
   return s.seats.filter((p): p is EnginePlayer => !!p);
+}
+
+const holeCardCount = (s: GameState) => (s.variant === 'omaha' ? 4 : 2);
+
+// ---------- table settings ----------
+
+/** Changes the blinds now if no hand is running, otherwise from the next hand. */
+export function setBlinds(s: GameState, smallBlind: number, bigBlind: number): void {
+  if (!(smallBlind > 0) || !(bigBlind >= smallBlind)) throw new GameError('Invalid blinds');
+  if (isBetting(s)) {
+    s.pendingBlinds = { smallBlind, bigBlind };
+    addLog(s, `Blinds will be ${smallBlind}/${bigBlind} from the next hand`);
+  } else {
+    s.smallBlind = smallBlind;
+    s.bigBlind = bigBlind;
+    s.minRaise = bigBlind;
+    s.pendingBlinds = null;
+    addLog(s, `Blinds are now ${smallBlind}/${bigBlind}`);
+  }
 }
 
 // ---------- hand flow ----------
 
 export function startHand(s: GameState, rng: Rng = secureRng, now = Date.now()): void {
   if (!canStartHand(s)) throw new GameError('Need at least two players to start');
+
+  if (s.pendingBlinds) {
+    s.smallBlind = s.pendingBlinds.smallBlind;
+    s.bigBlind = s.pendingBlinds.bigBlind;
+    s.pendingBlinds = null;
+    addLog(s, `Blinds are now ${s.smallBlind}/${s.bigBlind}`);
+  }
 
   for (const p of players(s)) {
     if (!p.connected && p.missedHands >= MAX_MISSED_HANDS && !p.sittingOut) {
@@ -204,11 +336,15 @@ export function startHand(s: GameState, rng: Rng = secureRng, now = Date.now()):
     p.allIn = false;
     p.acted = false;
     p.lastAction = null;
+    p.preAction = null;
     p.inHand = eligibleForHand(p);
+    p.handStartStack = p.stack;
+    if (p.inHand) p.timeBankMs = Math.min(TIME_BANK_MAX_MS, p.timeBankMs + TIME_BANK_PER_HAND_MS);
   }
 
   s.handNo += 1;
   s.board = [];
+  s.board2 = null;
   s.result = null;
   s.handSettled = false;
   s.handActions = [];
@@ -217,17 +353,46 @@ export function startHand(s: GameState, rng: Rng = secureRng, now = Date.now()):
   const inHand = (p: EnginePlayer | null) => !!p && p.inHand;
   const dealer = nextSeat(s, s.dealerSeat < 0 ? s.maxSeats - 1 : s.dealerSeat, inHand)!;
   s.dealerSeat = dealer;
-  const headsUp = players(s).filter((p) => p.inHand).length === 2;
+  const handCount = players(s).filter((p) => p.inHand).length;
+  const headsUp = handCount === 2;
   const sb = headsUp ? dealer : nextSeat(s, dealer, inHand)!;
   const bb = nextSeat(s, sb, inHand)!;
+  const bomb = s.bombPotNext;
+  s.bombPotNext = false;
 
-  addLog(s, `--- Hand #${s.handNo} ---`);
-  post(s, s.seats[sb]!, s.smallBlind, 'SB');
-  post(s, s.seats[bb]!, s.bigBlind, 'BB');
-  s.currentBet = Math.max(s.seats[sb]!.bet, s.seats[bb]!.bet);
+  addLog(s, `--- Hand #${s.handNo}${bomb ? ' (bomb pot)' : ''} ---`);
+
   s.minRaise = s.bigBlind;
+  let lastBlind = bb;
+  if (bomb) {
+    const ante = s.bombPotBB * s.bigBlind;
+    for (const p of players(s).filter((x) => x.inHand)) {
+      const amt = Math.min(ante, p.stack);
+      p.stack -= amt;
+      p.committed += amt;
+      if (p.stack === 0) p.allIn = true;
+      p.lastAction = 'Ante';
+      addLog(s, `${p.name} antes ${amt}`);
+    }
+    s.currentBet = 0;
+  } else {
+    post(s, s.seats[sb]!, s.smallBlind, 'SB');
+    post(s, s.seats[bb]!, s.bigBlind, 'BB');
+    s.currentBet = Math.max(s.seats[sb]!.bet, s.seats[bb]!.bet);
+    if (s.straddleAllowed && handCount >= 3) {
+      const utg = nextSeat(s, bb, inHand)!;
+      const p = s.seats[utg]!;
+      const straddle = s.bigBlind * 2;
+      if (p.wantsStraddle && p.stack > straddle) {
+        post(s, p, straddle, 'Straddle');
+        s.currentBet = straddle;
+        s.minRaise = straddle;
+        lastBlind = utg;
+      }
+    }
+  }
 
-  for (let round = 0; round < 2; round++) {
+  for (let round = 0; round < holeCardCount(s); round++) {
     let seat = sb;
     do {
       s.seats[seat]!.holeCards.push(s.deck.pop()!);
@@ -235,9 +400,15 @@ export function startHand(s: GameState, rng: Rng = secureRng, now = Date.now()):
     } while (seat !== sb);
   }
 
-  s.street = 'preflop';
   s.toAct = null;
-  moveOn(s, bb, now);
+  if (bomb) {
+    s.street = 'preflop';
+    dealNextStreet(s);
+    if (players(s).filter(canAct).length < 2) return runOut(s);
+    return moveOn(s, s.dealerSeat, now);
+  }
+  s.street = 'preflop';
+  moveOn(s, lastBlind, now);
 }
 
 function post(s: GameState, p: EnginePlayer, amount: number, label: string) {
@@ -259,7 +430,12 @@ export function legalActions(s: GameState, seatNo: number): LegalActions | null 
   const p = s.seats[seatNo];
   if (!canAct(p)) return null;
   const toCall = Math.min(s.currentBet - p.bet, p.stack);
-  const maxRaiseTo = p.bet + p.stack;
+  let maxRaiseTo = p.bet + p.stack;
+  if (s.variant === 'omaha') {
+    // Pot limit: raise by at most the pot after calling.
+    const pot = players(s).reduce((sum, o) => sum + o.committed, 0);
+    maxRaiseTo = Math.min(maxRaiseTo, s.currentBet + pot + toCall);
+  }
   const othersCanAct = s.seats.some((o) => o !== p && canAct(o));
   const canRaise = maxRaiseTo > s.currentBet && othersCanAct;
   const minRaiseTo = Math.min(maxRaiseTo, s.currentBet === 0 ? s.bigBlind : s.currentBet + s.minRaise);
@@ -318,6 +494,7 @@ export function applyAction(s: GameState, seatNo: number, action: PlayerAction, 
 
   p.acted = true;
   p.lastAction = label;
+  p.preAction = null;
   if (p.connected) p.missedHands = 0;
   s.handActions.push({ street: s.street, seatNo, userId: p.userId, action: action.type, amount, ts: now });
   addLog(s, `${p.name}: ${label}${amount ? ` ${action.type === 'raise' ? 'to ' + s.currentBet : amount}` : ''}`);
@@ -346,6 +523,68 @@ export function forceFold(s: GameState, seatNo: number, now = Date.now()): void 
   if (players(s).filter(isLive).length === 1) moveOn(s, s.toAct ?? seatNo, now);
 }
 
+// ---------- pre-actions, time bank, showing cards ----------
+
+/** Queues an action for when the player's turn comes. Pass null to clear it. */
+export function setPreAction(s: GameState, seatNo: number, preAction: PreAction | null): void {
+  const p = s.seats[seatNo];
+  if (!p) throw new GameError('You are not seated');
+  if (preAction === null) {
+    p.preAction = null;
+    return;
+  }
+  if (!['check_fold', 'check', 'call_any'].includes(preAction)) throw new GameError('Unknown pre-action');
+  if (!isBetting(s) || !canAct(p)) throw new GameError('You are not in this hand');
+  if (s.toAct === seatNo) throw new GameError("It's already your turn");
+  p.preAction = preAction;
+}
+
+function preActionFor(s: GameState, seatNo: number): PlayerAction | null {
+  const p = s.seats[seatNo]!;
+  const pa = p.preAction;
+  if (!pa) return null;
+  const legal = legalActions(s, seatNo);
+  p.preAction = null;
+  if (!legal) return null;
+  switch (pa) {
+    case 'check_fold':
+      return { type: legal.check ? 'check' : 'fold' };
+    case 'check':
+      return legal.check ? { type: 'check' } : null;
+    case 'call_any':
+      return { type: legal.check ? 'check' : 'call' };
+  }
+}
+
+/** Adds time from the player's bank to the current turn. */
+export function useTimeBank(s: GameState, seatNo: number): number {
+  const p = s.seats[seatNo];
+  if (!p || s.toAct !== seatNo || s.actionDeadline === null) throw new GameError("It's not your turn");
+  const add = Math.min(p.timeBankMs, TIME_BANK_CHUNK_MS);
+  if (add <= 0) throw new GameError('Your time bank is empty');
+  p.timeBankMs -= add;
+  s.actionDeadline += add;
+  addLog(s, `${p.name} uses ${Math.round(add / 1000)}s of time bank`);
+  return add;
+}
+
+/** Whether this seat can still show its cards for the finished hand. */
+export function canShowCards(s: GameState, seatNo: number): boolean {
+  const p = s.seats[seatNo];
+  if (s.street !== 'showdown' || !s.result || !p || !p.inHand || !p.holeCards.length) return false;
+  return !s.result.revealed.some((r) => r.seatNo === seatNo);
+}
+
+export function showCards(s: GameState, seatNo: number): void {
+  if (!canShowCards(s, seatNo)) throw new GameError('Nothing to show');
+  const p = s.seats[seatNo]!;
+  const handName = s.board.length >= 3 ? describeHand(p.holeCards, s.board, s.variant) : '';
+  s.result!.revealed.push({ seatNo, cards: p.holeCards.slice(), handName });
+  addLog(s, `${p.name} shows ${p.holeCards.join(' ')}${handName ? ` (${handName})` : ''}`);
+}
+
+// ---------- street progression ----------
+
 function findNextToAct(s: GameState, from: number): number | null {
   return nextSeat(s, from, (p) => canAct(p) && (!p.acted || p.bet < s.currentBet));
 }
@@ -358,6 +597,8 @@ function moveOn(s: GameState, from: number, now: number): void {
   if (next !== null) {
     s.toAct = next;
     s.actionDeadline = now + s.actionTimeoutMs;
+    const queued = preActionFor(s, next);
+    if (queued) applyAction(s, next, queued, now);
     return;
   }
 
@@ -365,6 +606,7 @@ function moveOn(s: GameState, from: number, now: number): void {
   for (const p of players(s)) {
     p.bet = 0;
     p.acted = false;
+    p.preAction = null;
     if (p.inHand && !p.folded && !p.allIn) p.lastAction = null;
   }
   s.currentBet = 0;
@@ -373,12 +615,8 @@ function moveOn(s: GameState, from: number, now: number): void {
   s.actionDeadline = null;
 
   if (s.street === 'river') return showdown(s);
+  if (players(s).filter(canAct).length < 2) return runOut(s);
   dealNextStreet(s);
-
-  if (players(s).filter(canAct).length < 2) {
-    while (s.board.length < 5) dealNextStreet(s);
-    return showdown(s);
-  }
   moveOn(s, s.dealerSeat, now);
 }
 
@@ -392,6 +630,35 @@ function dealNextStreet(s: GameState) {
     s.street = s.board.length === 4 ? 'turn' : 'river';
   }
   addLog(s, `${s.street[0].toUpperCase()}${s.street.slice(1)}: ${s.board.join(' ')}`);
+}
+
+/** Cards a runout of the current board needs, including burns. */
+function cardsNeeded(boardLen: number) {
+  return boardLen === 0 ? 8 : boardLen === 3 ? 4 : boardLen === 4 ? 2 : 0;
+}
+
+/** No more betting is possible: deal the rest of the board (twice, if everyone agreed) and show down. */
+function runOut(s: GameState) {
+  const live = players(s).filter(isLive);
+  const twice =
+    s.ritAllowed &&
+    s.board.length < 5 &&
+    live.length >= 2 &&
+    live.every((p) => p.ritOptIn) &&
+    s.deck.length >= 2 * cardsNeeded(s.board.length);
+  const base = s.board.slice();
+  while (s.board.length < 5) dealNextStreet(s);
+  if (twice) {
+    const b2 = base.slice();
+    while (b2.length < 5) {
+      s.deck.pop();
+      if (b2.length === 0) b2.push(s.deck.pop()!, s.deck.pop()!, s.deck.pop()!);
+      else b2.push(s.deck.pop()!);
+    }
+    s.board2 = b2;
+    addLog(s, `Running it twice. Second board: ${b2.join(' ')}`);
+  }
+  showdown(s);
 }
 
 function returnUncalledBet(s: GameState) {
@@ -422,6 +689,7 @@ function finishUncontested(s: GameState, winner: EnginePlayer) {
     winners: [{ seatNo: winner.seatNo, userId: winner.userId, name: winner.name, amount: total, handName: null }],
     revealed: [],
     board: s.board.slice(),
+    board2: null,
   });
 }
 
@@ -429,45 +697,66 @@ function showdown(s: GameState) {
   const all = players(s).filter((p) => p.inHand);
   const pots = computePots(all.map((p) => ({ seatNo: p.seatNo, committed: p.committed, folded: p.folded })));
   const live = all.filter((p) => !p.folded);
-  const { evaluated } = evaluateShowdown(
-    live.map((p) => ({ seatNo: p.seatNo, cards: p.holeCards })),
-    s.board,
-  );
-  const handNames = new Map(evaluated.map((e) => [e.seatNo, e.handName]));
+  const boards = s.board2 ? [s.board, s.board2] : [s.board];
+  const names = boards.map((board) => {
+    const { evaluated } = evaluateShowdown(
+      live.map((p) => ({ seatNo: p.seatNo, cards: p.holeCards })),
+      board,
+      s.variant,
+    );
+    return new Map(evaluated.map((e) => [e.seatNo, e.handName]));
+  });
   const won = new Map<number, number>();
+  const wonWith = new Map<number, string>();
 
   for (const pot of pots) {
     const contenders = live.filter((p) => pot.eligibleSeats.includes(p.seatNo));
-    const winners =
-      contenders.length === 1
-        ? [contenders[0].seatNo]
-        : evaluateShowdown(
-            contenders.map((p) => ({ seatNo: p.seatNo, cards: p.holeCards })),
-            s.board,
-          ).winners;
-    const ordered = orderFromDealer(s, winners);
-    const share = Math.floor(pot.amount / ordered.length);
-    let remainder = pot.amount - share * ordered.length;
-    for (const seatNo of ordered) {
-      const amt = share + (remainder > 0 ? 1 : 0);
-      if (remainder > 0) remainder--;
-      won.set(seatNo, (won.get(seatNo) ?? 0) + amt);
-    }
+    // With two boards each gets half the pot; the first board takes the odd chip.
+    const halves = boards.length === 2 ? [Math.ceil(pot.amount / 2), Math.floor(pot.amount / 2)] : [pot.amount];
+    boards.forEach((board, b) => {
+      const amount = halves[b];
+      if (amount <= 0) return;
+      const winners =
+        contenders.length === 1
+          ? [contenders[0].seatNo]
+          : evaluateShowdown(
+              contenders.map((p) => ({ seatNo: p.seatNo, cards: p.holeCards })),
+              board,
+              s.variant,
+            ).winners;
+      const ordered = orderFromDealer(s, winners);
+      const share = Math.floor(amount / ordered.length);
+      let remainder = amount - share * ordered.length;
+      for (const seatNo of ordered) {
+        const amt = share + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        won.set(seatNo, (won.get(seatNo) ?? 0) + amt);
+        if (!wonWith.has(seatNo)) wonWith.set(seatNo, names[b].get(seatNo) ?? '');
+      }
+    });
   }
 
   const winners: HandWinner[] = [];
   for (const [seatNo, amount] of won) {
     const p = s.seats[seatNo]!;
     p.stack += amount;
-    winners.push({ seatNo, userId: p.userId, name: p.name, amount, handName: handNames.get(seatNo) ?? null });
-    addLog(s, `${p.name} wins ${amount} with ${handNames.get(seatNo)}`);
+    const handName = wonWith.get(seatNo) || null;
+    winners.push({ seatNo, userId: p.userId, name: p.name, amount, handName });
+    addLog(s, `${p.name} wins ${amount}${handName ? ` with ${handName}` : ''}`);
   }
   const revealed: RevealedHand[] = live.map((p) => ({
     seatNo: p.seatNo,
     cards: p.holeCards.slice(),
-    handName: handNames.get(p.seatNo)!,
+    handName: names.map((m) => m.get(p.seatNo)).join(' / '),
   }));
-  endHand(s, { handNo: s.handNo, showdown: true, winners, revealed, board: s.board.slice() });
+  endHand(s, {
+    handNo: s.handNo,
+    showdown: true,
+    winners,
+    revealed,
+    board: s.board.slice(),
+    board2: s.board2?.slice() ?? null,
+  });
 }
 
 function orderFromDealer(s: GameState, seats: number[]): number[] {
@@ -483,6 +772,7 @@ function endHand(s: GameState, result: HandResult) {
   for (const p of players(s)) {
     p.bet = 0;
     p.allIn = false;
+    p.preAction = null;
   }
   s.street = 'showdown';
   s.toAct = null;
@@ -496,6 +786,7 @@ function resetToWaiting(s: GameState) {
   s.toAct = null;
   s.actionDeadline = null;
   s.board = [];
+  s.board2 = null;
   s.currentBet = 0;
 }
 

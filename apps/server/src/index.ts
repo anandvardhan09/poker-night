@@ -2,11 +2,19 @@ import http from 'node:http';
 import cors from 'cors';
 import express from 'express';
 import { Server } from 'socket.io';
-import type { Ack, ClientToServerEvents, ServerToClientEvents } from '@pk/shared';
+import {
+  REFILL_INTERVAL_MS,
+  STARTING_CHIPS,
+  type Ack,
+  type ClientToServerEvents,
+  type FriendInfo,
+  type ServerToClientEvents,
+} from '@pk/shared';
 import { authenticate, type HandshakeAuth } from './auth';
 import { config } from './config';
 import { GameError } from './engine';
-import { InsufficientChipsError, createStore, type AuthUser } from './store';
+import { computeStats } from './stats';
+import { InsufficientChipsError, RefillUnavailableError, createStore, type AuthUser } from './store';
 import { TableManager } from './tables/TableManager';
 
 interface SocketData {
@@ -38,8 +46,25 @@ async function notifyProfile(userId: string) {
 
 const tables = new TableManager(io, store, notifyProfile);
 
+/** Connected sockets per user, for friends' online status. */
+const online = new Map<string, Set<string>>();
+
+function friendTables(userId: string) {
+  const ids = new Set<string>();
+  for (const socketId of online.get(userId) ?? []) {
+    const sock = io.sockets.sockets.get(socketId);
+    for (const t of sock?.data.tables ?? []) ids.add(t);
+  }
+  return [...ids]
+    .map((id) => tables.peek(id))
+    .filter((rt) => rt && !rt.meta.settings.isPrivate && !rt.closed)
+    .map((rt) => ({ id: rt!.meta.id, name: rt!.meta.name }));
+}
+
 function errorMessage(e: unknown): string {
-  if (e instanceof GameError || e instanceof InsufficientChipsError) return e.message;
+  if (e instanceof GameError || e instanceof InsufficientChipsError || e instanceof RefillUnavailableError) {
+    return e.message;
+  }
   console.error(e);
   return 'Something went wrong';
 }
@@ -68,6 +93,8 @@ io.use(async (socket, next) => {
 io.on('connection', (socket) => {
   const user = socket.data.user;
   socket.join(`user:${user.id}`);
+  if (!online.has(user.id)) online.set(user.id, new Set());
+  online.get(user.id)!.add(socket.id);
 
   const requireTable = async (tableId: string) => {
     const rt = await tables.get(String(tableId));
@@ -91,11 +118,12 @@ io.on('connection', (socket) => {
     handle(ack, async () => ({ tableId: await tables.create(user, input ?? {}) })),
   );
 
-  socket.on('table:join', ({ tableId }, ack) =>
+  socket.on('table:join', ({ tableId, password }, ack) =>
     handle(ack, async () => {
       const rt = await requireTable(tableId);
+      const data = await rt.join(socket.id, user, password ? String(password) : undefined);
       socket.data.tables.add(rt.meta.id);
-      return rt.join(socket.id, user);
+      return data;
     }),
   );
 
@@ -148,6 +176,132 @@ io.on('connection', (socket) => {
     }),
   );
 
+  socket.on('table:preAction', ({ tableId, preAction }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).setPreAction(user, preAction ?? null);
+      return null;
+    }),
+  );
+
+  socket.on('table:timeBank', ({ tableId }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).useTimeBank(user);
+      return null;
+    }),
+  );
+
+  socket.on('table:showCards', ({ tableId }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).showCards(user);
+      return null;
+    }),
+  );
+
+  socket.on('table:prefs', ({ tableId, wantsStraddle, ritOptIn }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).setPrefs(user, { wantsStraddle, ritOptIn });
+      return null;
+    }),
+  );
+
+  socket.on('table:host', ({ tableId, op }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).host(user, op);
+      return null;
+    }),
+  );
+
+  socket.on('table:waitlist', ({ tableId, join }, ack) =>
+    handle(ack, async () => {
+      await (await joinedTable(tableId)).setWaitlist(user, !!join);
+      return null;
+    }),
+  );
+
+  socket.on('table:history', ({ tableId, limit }, ack) =>
+    handle(ack, async () => (await joinedTable(tableId)).history(user, Number(limit ?? 20))),
+  );
+
+  socket.on('table:react', async ({ tableId, emoji }) => {
+    const rt = await tables.get(String(tableId));
+    if (rt?.hasMember(socket.id)) rt.react(user, String(emoji));
+  });
+
+  socket.on('me:refill', (ack) =>
+    handle(ack, async () => {
+      const profile = await store.claimRefill(user.id, STARTING_CHIPS, REFILL_INTERVAL_MS);
+      void notifyProfile(user.id);
+      return profile;
+    }),
+  );
+
+  socket.on('stats:get', (p, ack) =>
+    handle(ack, async () => {
+      const id = String(p?.userId || user.id);
+      const profile = await store.getProfile(id);
+      if (!profile) throw new GameError('Player not found');
+      return computeStats(profile, await store.listPlayerHands(id));
+    }),
+  );
+
+  socket.on('leaderboard:get', (p, ack) =>
+    handle(ack, async () => {
+      if (p?.scope === 'friends') {
+        const ids = [user.id, ...(await store.listFriends(user.id))];
+        return store.leaderboard(50, ids);
+      }
+      return store.leaderboard(50);
+    }),
+  );
+
+  socket.on('friends:list', (ack) =>
+    handle(ack, async (): Promise<FriendInfo[]> => {
+      const profiles = await store.getProfiles(await store.listFriends(user.id));
+      return profiles
+        .map((f) => ({
+          userId: f.id,
+          name: f.displayName,
+          avatarUrl: f.avatarUrl,
+          online: !!online.get(f.id)?.size,
+          tables: friendTables(f.id),
+        }))
+        .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+    }),
+  );
+
+  socket.on('friends:add', (p, ack) =>
+    handle(ack, async () => {
+      const id = String(p?.userId ?? '');
+      if (!id || id === user.id || id.startsWith('bot:')) throw new GameError('You can\'t add that player');
+      if (!(await store.getProfile(id))) throw new GameError('Player not found');
+      await store.addFriend(user.id, id);
+      return null;
+    }),
+  );
+
+  socket.on('friends:remove', (p, ack) =>
+    handle(ack, async () => {
+      await store.removeFriend(user.id, String(p?.userId ?? ''));
+      return null;
+    }),
+  );
+
+  socket.on('friends:invite', (p, ack) =>
+    handle(ack, async () => {
+      const friendId = String(p?.userId ?? '');
+      const friends = await store.listFriends(user.id);
+      if (!friends.includes(friendId)) throw new GameError('You can only invite friends');
+      const rt = await joinedTable(String(p?.tableId));
+      io.to(`user:${friendId}`).emit('friend:invite', {
+        fromId: user.id,
+        fromName: user.name,
+        tableId: rt.meta.id,
+        tableName: rt.meta.name,
+      });
+      return null;
+    }),
+  );
+
   socket.on('chat:send', async ({ tableId, text }) => {
     const rt = await tables.get(String(tableId));
     if (rt?.hasMember(socket.id)) rt.sendChat(user, String(text ?? ''));
@@ -166,6 +320,9 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    const mine = online.get(user.id);
+    mine?.delete(socket.id);
+    if (mine && !mine.size) online.delete(user.id);
     for (const id of socket.data.tables) {
       tables.get(id).then((rt) => rt?.leave(socket.id)).catch((e) => console.error(e));
     }
